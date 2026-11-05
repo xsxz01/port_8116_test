@@ -38,9 +38,10 @@ port_probe_gui.exe
 Two additional tools are provided for diagnosing connectivity to
 `10.7.2.19:5060` and `10.7.2.19:5061`:
 
-- `sip_port_probe.exe` tests a single protocol/port combination. It first
-  checks whether the TCP or UDP port is reachable, then sends a SIP `OPTIONS`
-  request and reports any response together with a step-by-step analysis.
+- `sip_port_probe.exe` tests a single protocol/port combination. It opens a
+  TCP connection (or a connected UDP socket), sends a SIP `REGISTER` request,
+  and reports any response together with a step-by-step analysis. UDP is used
+  when `--protocol` is omitted.
 
   ```powershell
   sip_port_probe.exe --protocol tcp --port 5060
@@ -81,3 +82,9 @@ The resulting single-file executables are written to `target\release`.
   and print an installation hint before exiting.
 
 The other executables do not require npcap.
+
+## Documentation
+
+- [用 Rust 写一套端口与 SIP 连通性诊断工具链](docs/rust-port-probe-toolchain.md)
+  — project walkthrough, CLI reference, GPUI notes, and npcap packet-capture
+  analysis (Chinese).

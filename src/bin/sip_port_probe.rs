@@ -1,9 +1,9 @@
 use std::env;
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_TARGET: &str = "10.7.2.19";
 const DEFAULT_PORT: u16 = 5060;
@@ -11,15 +11,31 @@ const DEFAULT_TIMEOUT_MS: u64 = 3000;
 const RECV_BUFFER_SIZE: usize = 8192;
 const PREVIEW_SIZE: usize = 256;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transport {
+    Tcp,
+    Udp,
+}
+
+impl Transport {
+    fn name(self) -> &'static str {
+        match self {
+            Transport::Tcp => "TCP",
+            Transport::Udp => "UDP",
+        }
+    }
+}
+
 struct Args {
     port: u16,
     target: IpAddr,
     timeout: Duration,
+    transport: Transport,
 }
 
 fn usage() {
     eprintln!(
-        "Usage: sip_port_probe --port PORT [--target IP] [--timeout-ms MS]"
+        "Usage: sip_port_probe --port PORT [--protocol tcp|udp] [--target IP] [--timeout-ms MS]"
     );
 }
 
@@ -27,6 +43,7 @@ fn parse_args() -> Option<Args> {
     let mut port: Option<u16> = None;
     let mut target: Option<IpAddr> = None;
     let mut timeout_ms: Option<u64> = None;
+    let mut protocol: Option<String> = None;
 
     let mut iter = env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -34,12 +51,22 @@ fn parse_args() -> Option<Args> {
             "--port" => port = iter.next().and_then(|p| p.parse().ok()),
             "--target" => target = iter.next().and_then(|t| t.parse().ok()),
             "--timeout-ms" => timeout_ms = iter.next().and_then(|t| t.parse().ok()),
+            "--protocol" => protocol = iter.next(),
             other => {
                 eprintln!("Unknown argument: {}", other);
                 return None;
             }
         }
     }
+
+    let transport = match protocol.as_deref().unwrap_or("udp").to_lowercase().as_str() {
+        "tcp" => Transport::Tcp,
+        "udp" => Transport::Udp,
+        other => {
+            eprintln!("Unsupported protocol: {} (expected tcp or udp)", other);
+            return None;
+        }
+    };
 
     Some(Args {
         port: port.unwrap_or(DEFAULT_PORT),
@@ -50,6 +77,7 @@ fn parse_args() -> Option<Args> {
                 .into()
         }),
         timeout: Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
+        transport,
     })
 }
 
@@ -64,7 +92,7 @@ fn random_token(len: usize) -> String {
     format!("{:0width$x}", seed, width = len)
 }
 
-fn build_sip_register(target: SocketAddr, local: SocketAddr) -> String {
+fn build_sip_register(target: SocketAddr, local: SocketAddr, transport: Transport) -> String {
     let branch = format!("z9hG4bK{}", random_token(8));
     let tag = random_token(8);
     let call_id = format!("{}@{}", random_token(16), local.ip());
@@ -72,7 +100,7 @@ fn build_sip_register(target: SocketAddr, local: SocketAddr) -> String {
 
     let lines = [
         format!("REGISTER sip:{user}@{target} SIP/2.0"),
-        format!("Via: SIP/2.0/UDP {local};branch={branch}"),
+        format!("Via: SIP/2.0/{} {local};branch={branch}", transport.name()),
         format!("From: <sip:{user}@{local}>;tag={tag}"),
         format!("To: <sip:{user}@{target}>"),
         format!("Call-ID: {call_id}"),
@@ -119,6 +147,92 @@ fn parse_sip_status(data: &[u8]) -> Option<String> {
     }
 }
 
+fn probe_tcp(args: &Args) -> io::Result<()> {
+    let target = SocketAddr::new(args.target, args.port);
+    let start = Instant::now();
+
+    println!("Probe configuration");
+    println!("  Protocol          : TCP");
+    println!("  Target address    : {}", args.target);
+    println!("  Target port       : {}", args.port);
+    println!("  Timeout           : {:?}", args.timeout);
+    println!();
+
+    println!("Stage 1: Connect and send SIP REGISTER request");
+    let mut stream = match TcpStream::connect_timeout(&target, args.timeout) {
+        Ok(stream) => stream,
+        Err(e) => {
+            println!("  Result            : CONNECT FAILED");
+            println!("  Error kind        : {:?}", e.kind());
+            println!("  Error message     : {}", e);
+            println!();
+            println!("Probe complete");
+            println!("  Overall result    : UNREACHABLE OR FILTERED");
+            return Err(e);
+        }
+    };
+    stream.set_read_timeout(Some(args.timeout))?;
+    stream.set_write_timeout(Some(args.timeout))?;
+
+    let local = stream.local_addr()?;
+    let sip = build_sip_register(target, local, Transport::Tcp);
+    stream.write_all(sip.as_bytes())?;
+
+    println!("  Local address     : {}", local);
+    println!("  Request bytes     : {}", sip.len());
+    println!("  Request preview   : {}", text_preview(sip.as_bytes()));
+
+    println!();
+    println!("Stage 2: Wait for SIP response");
+    let mut buffer = vec![0_u8; RECV_BUFFER_SIZE];
+    match stream.read(&mut buffer) {
+        Ok(0) => {
+            println!("  Result            : CONNECTION CLOSED");
+            println!("  Analysis          : the peer closed the TCP connection without a SIP response.");
+            println!();
+            println!("Probe complete");
+            println!("  Overall result    : UNREACHABLE OR FILTERED");
+            Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "peer closed the connection without a SIP response",
+            ))
+        }
+        Ok(n) => {
+            buffer.truncate(n);
+            println!("  Result            : RECEIVED");
+            println!("  Response bytes    : {}", n);
+            println!("  Response preview  : {}", text_preview(&buffer));
+            println!("  Elapsed           : {:?}", start.elapsed());
+            if let Some(status) = parse_sip_status(&buffer) {
+                println!("  SIP status line   : {}", status);
+                println!();
+                println!("Probe complete");
+                println!("  Overall result    : REACHABLE (SIP response received)");
+                Ok(())
+            } else {
+                println!("  SIP parse         : response does not look like a valid SIP message");
+                println!();
+                println!("Probe complete");
+                println!("  Overall result    : NON-SIP RESPONSE");
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "peer returned non-SIP data",
+                ))
+            }
+        }
+        Err(e) => {
+            println!("  Result            : NO RESPONSE");
+            println!("  Error kind        : {:?}", e.kind());
+            println!("  Error message     : {}", e);
+            println!("  Analysis          : the TCP connection succeeded but no SIP response arrived; the port may be open while the service is silent or the request was rejected.");
+            println!();
+            println!("Probe complete");
+            println!("  Overall result    : UNREACHABLE OR FILTERED");
+            Err(e)
+        }
+    }
+}
+
 fn probe_udp(args: &Args) -> io::Result<()> {
     let target = SocketAddr::new(args.target, args.port);
 
@@ -135,7 +249,7 @@ fn probe_udp(args: &Args) -> io::Result<()> {
     socket.set_read_timeout(Some(args.timeout))?;
 
     println!("Stage 1: Send SIP REGISTER request");
-    let sip = build_sip_register(target, local);
+    let sip = build_sip_register(target, local, Transport::Udp);
     let bytes_sent = socket.send(sip.as_bytes())?;
     println!("  Local address     : {}", local);
     println!("  Request bytes     : {}", bytes_sent);
@@ -189,6 +303,9 @@ fn main() {
         }
     };
 
-    let result = probe_udp(&args);
+    let result = match args.transport {
+        Transport::Tcp => probe_tcp(&args),
+        Transport::Udp => probe_udp(&args),
+    };
     process::exit(if result.is_ok() { 0 } else { 1 });
 }
