@@ -90,3 +90,6 @@ The other executables do not require npcap.
 - [用 Rust 写一套端口与 SIP 连通性诊断工具链](docs/rust-port-probe-toolchain.md)
   — project walkthrough, CLI reference, GPUI notes, and npcap packet-capture
   analysis (Chinese).
+- [CSDN-ready copy](docs/rust-port-probe-toolchain-csdn.md) — same article with
+  absolute `raw.githubusercontent.com` image URLs, for pasting into a blog
+  editor.
