@@ -1,0 +1,2 @@
+[env]
+LIBPCAP_LIBDIR = { value = "npcap-sdk-1.16/Lib/x64", relative = true }

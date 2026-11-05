@@ -1,0 +1,9 @@
+/target
+/npcap-sdk-*
+/npcap-sdk-*.zip
+
+# Stray build artifacts
+*.o
+*.pdb
+*.rcgu.*
+/nul*

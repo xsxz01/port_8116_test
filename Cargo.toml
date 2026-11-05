@@ -1,0 +1,40 @@
+[package]
+name = "port_8116_test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pcap = "2.4"
+gpui = "0.2"
+gpui-component = "0.5"
+
+[[bin]]
+name = "tcp_8116_listener"
+path = "src/bin/tcp_8116_listener.rs"
+
+[[bin]]
+name = "udp_8116_listener"
+path = "src/bin/udp_8116_listener.rs"
+
+[[bin]]
+name = "port_probe"
+path = "src/bin/port_probe.rs"
+
+[[bin]]
+name = "port_probe_gui"
+path = "src/bin/port_probe_gui.rs"
+
+[[bin]]
+name = "sip_port_probe"
+path = "src/bin/sip_port_probe.rs"
+
+[[bin]]
+name = "sip_port_probe_npcap"
+path = "src/bin/sip_port_probe_npcap.rs"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
