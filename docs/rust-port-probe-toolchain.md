@@ -233,6 +233,10 @@ match socket.recv_from(&mut buffer) {
 
 注意这里 `success = false` 的语义是“**没拿到证据**”，而不是“端口关闭”。UDP 无响应至少有三种可能：端口被防火墙静默丢弃、主机不可达、服务在监听但压根不回这个载荷。所以输出里我特意把这句话写全，避免现场拿着一张“UDP 不通”的截图去下结论。
 
+![UDP 探测无响应时的输出](images/port-probe-udp.png)
+
+*图 4-1 UDP 探测的输出：本机 8116 的监听器确实收到了数据报，但它不回包，探测端只能得到“无响应”*
+
 也正因为这个差异，后面的 SIP 探测才要分两层：先确认端口层面有没有反应，再确认协议层面能不能拿到合法响应。
 
 ---
@@ -267,6 +271,10 @@ TCP connection accepted
   Listener state    : stopped
 ```
 
+![TCP 监听器收到连接后的输出](images/tcp-listener.png)
+
+*图 5-1 TCP 监听器打印本地/对端地址和时间戳后立即退出*
+
 UDP 版本同理，只是把 `accept` 换成 `recv_from`，并且用 65535 字节的缓冲区接住完整数据报，再取前 32 字节做十六进制预览：
 
 ```rust
@@ -275,6 +283,10 @@ let (received_length, peer_address) = socket.recv_from(&mut buffer)?;
 ```
 
 十六进制预览这个设计在现场很实用：有些设备发过来的根本不是你以为的协议，看到 `16 03 01 ...` 就知道是 TLS 而不是明文，省得在应用层瞎猜。
+
+![UDP 监听器收到的数据报预览](images/udp-listener.png)
+
+*图 5-2 UDP 监听器把载荷前 32 字节打成十六进制：`70 6F 72 74 2D 70 72 6F 62 65` 正是 `port-probe`*
 
 为什么只收一次就退出？因为这类工具的使用场景是“排查动作”，不是“常驻服务”。抓完即走，既不用管进程回收，也不会因为长期占用端口被杀软或者防火墙策略盯上。
 
@@ -333,6 +345,14 @@ port_probe.exe --target 10.7.2.140 --start-port 8000 --end-port 9000 --protocol 
   可达: 1 个
   不可达/无响应: 0 个
 ```
+
+![单端口探测成功](images/port-probe-tcp.png)
+
+*图 6-1 单端口探测成功：连接耗时、本地源端口、结论一次给全*
+
+![端口段扫描结果](images/port-probe-range.png)
+
+*图 6-2 端口段扫描：8112-8120 里只有 8116 是通的，其余全部 TimedOut*
 
 最后一段的退出码是有意设计的：
 
@@ -395,12 +415,22 @@ cx.spawn(move |this: gpui::WeakEntity<Self>, cx: &mut gpui::AsyncApp| {
 }).detach();
 ```
 
+![端口探测工具主界面](images/port-probe-gui.png)
+
+*图 7-1 上半部分是端口段扫描，下半部分是国标 SIP 端口测试*
+
+![端口段扫描的结果列表](images/port-probe-gui-results.png)
+
+*图 7-2 8112-8120 批量扫描：9 个端口里只有 8116 可达，其余按超时标红*
+
 这里有两个小心思：
 
 1. **逐个回填结果**，而不是等整段扫完一次性渲染。扫 8000-9000 这种区间时，用户能实时看到进度，体验差别很大。
 2. `cx.notify()` 只在数据变化时调用，避免无谓重绘。
 
 结果列表用固定高度 + `overflow_y_scrollbar()`，每行按“协议 / 地址:端口 / 结论 / 耗时与详情”四列排布，成功绿色、失败红色，一眼扫过去就知道哪些端口是活的。
+
+整个页面外层也套了一层纵向滚动。这一点是截图时才发现的：窗口默认 600 逻辑像素高，而表单加 SIP 区块再加 320 像素的结果列表已经超过 900，在 150% 缩放的笔记本屏上，结果列表会被直接裁掉。加上滚动之后，至少能滑下去看结果。
 
 如果要说不足，目前扫描是**串行 for 循环**，扫一个大端口段的耗时约等于“端口数 × 超时”。真要扫全端口，正确做法是起一个固定大小的并发池（比如 64 个 worker + `futures::stream::buffer_unordered`），这一点留给后续版本。
 
@@ -534,6 +564,14 @@ Probe complete
   Overall result    : REACHABLE (SIP response received)
 ```
 
+![SIP 探测收到 401 响应](images/sip-probe-udp.png)
+
+*图 8-1 收到 `401 Unauthorized`：服务是活的，只是要求鉴权。此图为本机模拟响应，用于演示判定逻辑*
+
+![SIP TCP 连接失败](images/sip-probe-tcp-closed.png)
+
+*图 8-2 TCP 连不上时直接停在 Stage 1，不会把“端口不通”和“协议不认”混为一谈*
+
 ---
 
 ## 九、npcap：让抓包给探测结果作证
@@ -545,7 +583,7 @@ Probe complete
 | 名称 | 用途 | 本项目处理方式 |
 | --- | --- | --- |
 | Npcap SDK | 编译期需要 `wpcap.lib` | 把 SDK 解压到 `npcap-sdk-1.16/`，`.cargo/config.toml` 会自动指向它（SDK 本身不随仓库提交） |
-| Npcap 运行时 | 运行期需要 `wpcap.dll` | 程序启动时检测常见安装路径，缺失就打印提示并退出 |
+| Npcap 运行时 | 运行期需要 `wpcap.dll` | 程序启动时检测 `wpcap.dll` 的常见安装路径（缺 DLL 时的真实表现见第十节第 3 条） |
 
 ```toml
 [env]
@@ -636,7 +674,14 @@ SIP 场景里 `401` 也是好消息。判断服务是否存活，要看有没有
 
 **3. npcap 的 SDK 和运行时是两回事**
 
-编译期找不到 `wpcap.lib` 是 SDK 没配好；运行期报错是没装 npcap 驱动。这两个错误信息很像，但解决方式完全不同，所以程序启动时先做一次显式检测，给出明确提示。
+编译期找不到 `wpcap.lib` 是 SDK 没配好；运行期报错是没装 npcap 驱动，这两件事的解决方式完全不同。
+
+更坑的是运行时缺失的表现：`pcap` crate 是静态导入 `wpcap.dll` 的，DLL 不在时进程根本进不到 `main`，而是直接以 `0xC0000135`（`STATUS_DLL_NOT_FOUND`）退出，一个字的提示都没有。代码里那个 `is_npcap_installed()` 检查只有在进程能启动之后才有意义，所以部署时不要依赖它兜底，先在目标机上确认 npcap 驱动已经装好。
+
+```powershell
+# 快速确认 npcap 运行时是否就位
+Test-Path C:\Windows\System32\Npcap\wpcap.dll
+```
 
 **4. Windows 上重定向到 `NUL` 会留下垃圾文件**
 

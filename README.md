@@ -78,8 +78,10 @@ The resulting single-file executables are written to `target\release`.
   `.cargo\config.toml` automatically sets `LIBPCAP_LIBDIR`, so no extra
   environment configuration is needed to build.
 - The **Npcap runtime** must still be installed on any machine that runs
-  `sip_port_probe_npcap.exe`. If it is missing, the program will detect that
-  and print an installation hint before exiting.
+  `sip_port_probe_npcap.exe`. Because `wpcap.dll` is imported at load time,
+  a missing runtime makes the executable exit with `0xC0000135`
+  (`STATUS_DLL_NOT_FOUND`) before `main` runs, so install Npcap first rather
+  than relying on the in-program hint.
 
 The other executables do not require npcap.
 

@@ -258,6 +258,7 @@ impl Render for PortProbeGui {
             .gap_3()
             .p_4()
             .size_full()
+            .overflow_y_scrollbar()
             .child(
                 div()
                     .text_xl()
